@@ -1,0 +1,114 @@
+# ─────────────────────────────────────────────────────────────────────
+# nginx 入口层 Compose 定义
+#
+# 只负责 HTTP 入口：监听 80，把请求按路径转给 web-net 上的业务容器。
+# 本文件既可被根目录 compose.yml 通过 include 聚合，也可单独 up 调试。
+#
+# 参数详解见每项下方的 ↑ 注释。
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+  # ↑ 顶层 services 下每个键都是一个"服务"（一个容器）。
+  #   这里是单服务，键名 nginx 同时就是该服务在 compose 里的标识。
+
+  nginx:
+    image: nginx:stable-alpine
+    # ↑ 直接拉官方镜像，不在本地构建。
+    #   stable-alpine = 官方 stable 分支 + Alpine Linux 基础系统（约 50MB，
+    #   比 Debian 版小 3 倍多）。alpine 用 musl libc 而非 glibc，
+    #   nginx 自身没问题；若以后服务要用 glibc 编译的二进制，改回 nginx:stable。
+
+    container_name: nginx
+    # ↑ 固定容器名。默认情况下 compose 会生成 "<项目名>-nginx-1" 这种名字。
+    #   固定后 docker logs nginx / docker exec nginx 更顺手，
+    #   且这个名字会成为 web-net 内的 DNS 名，nginx 反代时直接写它。
+    #   代价：不能横向扩容（多副本会撞名），不同 compose 项目之间也不能重名。
+
+    restart: unless-stopped
+    # ↑ 重启策略，四选一：
+    #     no             从不自动重启（默认值）
+    #     always         总是重启，含 docker 守护进程重启后
+    #     on-failure     仅非 0 退出码才重启
+    #     unless-stopped 除"手动 stop"以外都重启  ← 选它
+    #   含义：容器意外崩溃、宿主机重启后能自己爬起来；
+    #   但你是手动 stop 掉的，它就乖乖待着，不会在维护时自己复活。
+
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    # ↑ 端口映射，格式 "<宿主机端口>:<容器端口>"。
+    #   ${NGINX_PORT:-80} 是 compose 的变量插值：先读 .env 里的 NGINX_PORT，
+    #   没定义就取 :- 后面的默认值 80。
+    #   注意：映射后监听的是 0.0.0.0（所有网卡），Docker 会自己写 iptables 放行，
+    #   真正的边界是华为云安全组——所以"安全组只放行 22/80"这条必须守住。
+
+    volumes:
+      - ./conf.d:/etc/nginx/conf.d:ro
+    # ↑ 绑定挂载，格式 "<宿主机路径>:<容器路径>:<模式>"。
+    #   ./ 是相对路径，相对于"本 compose 文件所在目录"，
+    #   而不是你在哪个目录敲的 docker 命令——这点跟很多人直觉相反。
+    #   :ro 只读挂载，容器改不动宿主机文件，也防止 nginx 误写配置目录。
+    #   改完 default.conf 后执行：
+    #     docker compose exec nginx nginx -s reload
+    #   即可热加载，不用重建容器。
+
+    networks:
+      - web-net
+    # ↑ 加入哪些网络。同一个网络内的容器才能用"容器名"互相访问，
+    #   不同网络的容器互相不可见。
+    #   这里只接 web-net：入口层碰不到 db-net 上的数据库，
+    #   即使 nginx 被攻破也摸不到数据层。
+
+    mem_limit: 128m
+    # ↑ 容器内存硬上限。超了会被 OOM killer 干掉，退出码 137。
+    #   它限制的是内存，不是 CPU。
+    #   数值来自架构文档 §7 的资源预算（2G 里可分给容器约 1700M）。
+    #   实测这个 nginx 只占约 7.6MB，128m 是留足余量的护栏。
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # ↑ Docker 默认日志驱动就是 json-file，而且默认不限大小——
+    #   长期运行能把磁盘写满，2C2G 的机器尤其经不起。
+    #   这里：单个日志文件滚到 10MB 就切新文件，最多保留 3 个，
+    #   即每个容器日志上限约 30MB。
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # ↑ 健康探测命令。两种写法区别很大：
+      #     CMD        直接 exec 执行，不经过 shell，不支持管道/变量展开
+      #     CMD-SHELL  走 sh -c，能写复杂命令
+      #   这里用 wget 不用 curl：alpine 镜像自带 busybox 的 wget，但没有 curl。
+      #   -q 静默，-O /dev/null 丢弃响应体，只关心退出码。
+      #   127.0.0.1 是容器自己，所以探测不经过容器网络也不经过 nginx 的路由。
+
+      interval: 30s
+      # ↑ 每 30 秒探一次。
+
+      timeout: 3s
+      # ↑ 单次探测超过 3 秒算失败。
+
+      retries: 3
+      # ↑ 连续失败 3 次才标记为 unhealthy。偶发抖动不会误报。
+
+      start_period: 5s
+      # ↑ 启动宽限期：容器刚起来这 5 秒内的失败不计入 retries，
+      #   用来规避"进程还没监听端口"造成的假失败。
+
+      # 注意：healthcheck 只改变容器状态（docker ps 的 STATUS 列显示 healthy/unhealthy），
+      # 它本身不会触发重启。要"不健康就自动重启"需要 swarm 或外部工具，
+      # 这里只作为观察手段。
+
+networks:
+  web-net:
+    external: true
+  # ↑ external: true 表示这个网络不由本项目创建，也不由本项目删除，
+  #   必须事先手工存在：docker network create web-net
+  #
+  #   为什么这么做：
+  #   1. 多个 compose 项目可以共享同一个网络，服务之间才通；
+  #   2. docker compose down 不会顺手把网络删掉，其他服务的连接不断。
+  #
+  #   如果删掉 external（用默认行为），compose 会自动创建 <项目名>_web-net，
+  #   于是每个项目各有一个网络，反而互相访问不到。

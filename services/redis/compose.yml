@@ -1,0 +1,55 @@
+# ─────────────────────────────────────────────────────────────────────
+# Redis 7 —— 缓存 / 中间件
+# 只接 db-net，不映射端口：与 MySQL 一样，外部不可达由「安全组 + 无端口映射」保证。
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+  redis:
+    image: redis:7-alpine
+    # ↑ 固定主版本 7。文档里写的是 redis:alpine（浮动标签），
+    #   这里收紧到大版本，避免哪天自动跳到 8.x 带来行为差异。
+
+    container_name: redis
+    # ↑ 服务名 = 容器名 = db-net 内部域名，业务服务连它写 host=redis。
+
+    restart: unless-stopped
+
+    # 这里没有 env_file：Redis 从 redis.conf 读配置，不需要注入环境变量。
+    # 为了「与其他服务保持一致」而硬加一个空 .env，只会让部署多一步、没有收益。
+
+    networks:
+      - db-net
+
+    mem_limit: 128m
+    # ↑ 架构文档 §7 的预算。配合 redis.conf 的 maxmemory 96mb 才有意义：
+    #   容器上限是保险丝，maxmemory 决定平时怎么用。
+
+    volumes:
+      - ../../data/redis:/data
+      # ↑ 相对本 compose 文件，即仓库根的 data/redis。
+      #   RDB 快照文件落在这里，容器重建不丢。
+
+      - ./conf/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      # ↑ 只读挂载配置。改完要 restart 才生效。
+
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    # ↑ 显式指定配置文件，否则镜像会用内置默认值，挂进去的 conf 白搭。
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      # ↑ 返回 PONG 即退出码 0；连不上则非 0。
+      #   本服务没设密码，所以不需要 REDISCLI_AUTH。
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  db-net:
+    external: true

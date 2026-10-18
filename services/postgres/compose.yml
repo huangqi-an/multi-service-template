@@ -1,0 +1,77 @@
+# ─────────────────────────────────────────────────────────────────────
+# PostgreSQL 17 —— 关系型数据服务（替代原 mysql）
+# 只接 db-net，不映射端口：外部不可达由「安全组 + 无端口映射」保证。
+# 数据落在仓库根的 data/postgres/，容器销毁重建不丢。
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    # ↑ 17 是当前稳定大版本，alpine 版约 424MB（mysql:8.0 是 1.1GB）。
+
+    container_name: postgres
+    # ↑ 服务名 = 容器名 = db-net 内部域名。业务服务连库写 host=postgres。
+
+    restart: unless-stopped
+
+    env_file: .env
+    # ↑ 需要 POSTGRES_PASSWORD（超级用户）、POSTGRES_DB、APP_PASSWORD。
+    #   这些只在 data 目录为空、首次初始化时生效，之后改不动已有密码。
+
+    networks:
+      - db-net
+
+    mem_limit: 512m
+    # ↑ 与 mysql 同预算。PG 的实际占用由下面几个参数决定，mem_limit 只是兜底。
+
+    volumes:
+      - ../../data/postgres:/var/lib/postgresql/data
+      # ↑ 数据目录，相对本 compose 文件即仓库根的 data/postgres。
+
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+      # ↑ 只在首次初始化时执行一次，用来创建业务账号 app。
+      #   数据目录已有内容时不会重跑——这点和 MySQL 的 initdb 目录一致。
+
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=50
+    # ↑ 用 -c 参数覆盖，而不是挂一个 postgresql.conf。
+    #   原因：一旦用 config_file 指向别处，PG 会连带把 pg_hba.conf 的
+    #   默认位置也改到那个目录，找不到就起不来——这类坑不值得为"注释好看"去踩。
+    #
+    # 各项含义：
+    #   shared_buffers        共享缓冲池，PG 最吃内存的一块，约总内存 25%
+    #   effective_cache_size  给优化器的估计值，不实际分配内存，只影响执行计划
+    #   work_mem              每个排序/哈希操作可用内存，连接多时会累乘，
+    #                         所以给 4MB 这种小值；真跑大查询时按会话临时调
+    #   maintenance_work_mem  VACUUM / CREATE INDEX 用，单独给大一点
+    #   max_connections       一连接一进程，每条连接都有独立内存开销，
+    #                         2G 机器上不能放开
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      # ↑ pg_isready 能连上就返回 0，比真跑一条 SQL 轻。
+      #   $$ 是 compose 转义，容器内由 sh 展开成单个 $。
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+networks:
+  db-net:
+    external: true

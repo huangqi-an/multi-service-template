@@ -1,0 +1,5 @@
+# 不进入构建上下文的文件：镜像更小、构建更快，也避免把 .env 打进镜像
+.env
+.git
+.gitignore
+README.md

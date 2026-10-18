@@ -1,0 +1,50 @@
+# ─────────────────────────────────────────────────────────────────────
+# hello-api —— 端到端链路验证服务
+# 已被根目录 compose.yml include，正常从根目录启停；
+# 本文件也可单独 up 调试，但容器名固定，与根项目不能同时启动。
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+  hello-api:
+    build: .
+    # ↑ 用当前目录的 Dockerfile 构建镜像。
+    #   改了 main.go 后要 docker compose up -d --build 才会重建镜像。
+
+    container_name: hello-api
+    # ↑ 服务名 = 容器名 = web-net 内部域名，三者一致。
+    #   nginx 里 proxy_pass http://hello-api:8000/ 用的就是这个名字。
+
+    restart: unless-stopped
+
+    env_file: .env
+    # ↑ 部署前先 cp .env.example .env，缺失会直接启动失败。
+
+    networks:
+      - web-net
+    # ↑ 只接 web-net：本服务不碰数据库，所以不挂 db-net。
+    #   即使它被攻破，也在网络层面够不到 MySQL/Redis——这就是分域的价值。
+
+    mem_limit: 256m
+    # ↑ 架构文档 §7 给业务服务的预算；超限会被 OOM kill。
+
+    # ports: 不声明，全部流量经 nginx 入口层转发
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/healthz"]
+      # ↑ 运行镜像基于 alpine，自带 busybox 的 wget，可直接探活。
+      #   这也是运行阶段不用 scratch 的原因：scratch 里没有 shell 也没有 wget。
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+      # ↑ 宽限期给到 10s：uvicorn 冷启动比 nginx 慢，给少了会假失败。
+
+networks:
+  web-net:
+    external: true

@@ -1,0 +1,64 @@
+# [[template-only:start]]
+# 这是服务模板，不是可运行服务，总入口 compose.yml 不 include 它。
+# 用脚本从它生成新服务（会顺带删掉这段说明）：
+#   ./scripts/new-service.sh <service-name>
+# [[template-only:end]]
+#
+# 约定：服务名 = 容器名 = web-net 内部域名，三者保持一致，
+#      这样 nginx 反代时直接写服务名即可，不用记 IP。
+
+services:
+  my-app:
+    build: .
+    # ↑ 用"当前目录的 Dockerfile"构建镜像，所以这个目录里必须有 Dockerfile。
+    #   如果服务直接用现成镜像（例如 mysql:8、redis:alpine），
+    #   删掉这一行改成： image: <镜像名>:<标签>
+
+    container_name: my-app
+    # ↑ 固定容器名，必须与上面的服务名一致。
+    #   这个名字就是 web-net 内的 DNS 名，nginx 的 proxy_pass 写它。
+
+    restart: unless-stopped
+    # ↑ 除"手动 stop"外总是自动重启：进程崩溃、宿主机重启都能自愈。
+
+    env_file: .env
+    # ↑ 启动时把 .env 里的键值对注入容器环境变量。
+    #   .env 不入库（见 .gitignore），部署前先执行：
+    #     cp .env.example .env
+    #   文件缺失会直接启动失败——这是有意的：
+    #   比带着空配置静默跑起来、之后再查"为什么连不上数据库"要好得多。
+
+    networks:
+      - web-net
+      # - db-net
+    # ↑ web-net 必接：不接的话 nginx 在 web-net 上找不到这个容器，反代直接 502。
+    #   db-net 只在需要访问 MySQL/Redis 时取消注释。
+    #   不接 db-net 的服务，在网络层面根本碰不到数据库——这就是分域的意义。
+
+    mem_limit: 256m
+    # ↑ 内存硬上限，必填（架构文档 §7 规定：未声明上限的服务不允许部署）。
+    #   超限会被 OOM kill（退出码 137）。
+    #   填之前先算剩余预算：2G 里可分给容器约 1700M，nginx 已占 128m。
+
+    # ports:
+    #   - "${APP_PORT:-8000}:8000"
+    # ↑ 默认不声明端口映射：所有流量统一走 nginx 入口层。
+    #   只有调试需要直连时才临时放开，调试完记得注释回去，
+    #   否则服务会绕过 nginx 直接暴露在公网。
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # ↑ 与 nginx 一致：单个日志滚到 10MB 就切文件，最多保留 3 个，
+    #   每个服务日志上限约 30MB。
+
+networks:
+  web-net:
+    external: true
+  # db-net:
+  #   external: true
+  # ↑ external: true 表示这两个网络已存在，不由本项目创建或删除。
+  #   它们由 docker network create web-net db-net 手工建好，
+  #   多个 compose 项目共用同一个网络，服务之间才能互相访问。

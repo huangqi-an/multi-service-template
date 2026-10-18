@@ -1,0 +1,35 @@
+# ── 持久化数据 ────────────────────────────────
+# 数据统一收敛到 data/<服务名>/，只保留目录占位，内容不入版本库
+data/**
+!data/.gitkeep
+
+# ── 环境差异配置 ──────────────────────────────
+# .env 存放端口、名称等环境差异项，按惯例不入库
+# 各目录提供 .env.example 作为模板，落地时复制为 .env
+.env
+.env.*
+!.env.example
+
+# ── Node / TypeScript ─────────────────────────
+# 依赖目录：体量大、且能由 package-lock.json 完整还原，绝不入库
+node_modules/
+
+# 包管理器缓存
+.npm/
+.pnpm-store/
+.yarn/cache/
+
+# TypeScript 编译产物：由镜像内 tsc 生成，不需要版本控制
+dist/
+*.tsbuildinfo
+
+# 安装/构建调试日志
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── 运行时产物 ────────────────────────────────
+*.log
+logs/
+.DS_Store
+Thumbs.db
